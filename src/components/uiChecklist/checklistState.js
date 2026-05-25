@@ -31,8 +31,17 @@ export function applyChecklistStateToMarkdown(markdown, state) {
 }
 
 export function normalizeTaskRows(rows) {
-  return (rows || []).reduce((acc, row) => {
-    if (row?.task_id) acc[row.task_id] = Boolean(row.checked);
-    return acc;
-  }, {});
+  return (rows || []).reduce(
+    (acc, row) => {
+      if (row?.task_id) {
+        acc.checkedState[row.task_id] = Boolean(row.checked);
+        acc.auditState[row.task_id] = {
+          checkedBy: row.checked_by || '',
+          checkedAt: row.checked_at || '',
+        };
+      }
+      return acc;
+    },
+    { checkedState: {}, auditState: {} }
+  );
 }

@@ -9,6 +9,14 @@
         </div>
       </div>
       <div class="ui-checklist-actions">
+        <label class="ui-checklist-user">
+          <span>我的名字</span>
+          <select v-model="operatorName" @change="saveOperatorName">
+            <option value="">请选择</option>
+            <option value="陶帅民">陶帅民</option>
+            <option value="王森">王森</option>
+          </select>
+        </label>
         <button type="button" @click="setAll(true)">全部勾选</button>
         <button type="button" @click="setAll(false)">全部取消</button>
         <button type="button" class="primary" @click="exportMarkdown">导出 Markdown</button>
@@ -29,8 +37,11 @@ import {
 } from './checklistState.js';
 import { hasSupabaseConfig, supabase } from './supabaseClient.js';
 
+const OPERATOR_NAME_KEY = 'ui-checklist-operator-name';
 const contentRef = ref(null);
 const state = reactive({});
+const auditState = reactive({});
+const operatorName = ref('');
 const syncStatus = ref(hasSupabaseConfig ? 'connecting' : 'disabled');
 let channel = null;
 
@@ -48,22 +59,76 @@ function ensureState() {
   for (let index = 0; index < TASK_COUNT; index += 1) {
     const taskId = `task-${index}`;
     if (!(taskId in state)) state[taskId] = false;
+    if (!(taskId in auditState)) auditState[taskId] = { checkedBy: '', checkedAt: '' };
   }
 }
 
-function renderCheckboxes() {
+function formatAuditInfo(taskId) {
+  const audit = auditState[taskId];
+  if (!audit?.checkedBy && !audit?.checkedAt) return '';
+
+  const parts = [];
+  if (audit.checkedBy) parts.push(audit.checkedBy);
+  if (audit.checkedAt) {
+    parts.push(
+      new Intl.DateTimeFormat('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(new Date(audit.checkedAt))
+    );
+  }
+  return parts.join(' · ');
+}
+
+function ensureAuditNode(box) {
+  const taskId = box.dataset.id;
+  let node = contentRef.value?.querySelector(`[data-audit-for="${taskId}"]`);
+  if (node) return node;
+
+  node = document.createElement('span');
+  node.className = 'ui-checklist-audit';
+  node.dataset.auditFor = taskId;
+
+  const labelText = box.closest('label')?.querySelector('span');
+  if (labelText) {
+    labelText.insertAdjacentElement('afterend', node);
+    return node;
+  }
+
+  const row = box.closest('tr');
+  const lastCell = row?.lastElementChild;
+  if (lastCell) {
+    lastCell.appendChild(node);
+    return node;
+  }
+
+  box.insertAdjacentElement('afterend', node);
+  return node;
+}
+
+function renderChecklist() {
   nextTick(() => {
     contentRef.value?.querySelectorAll('input.task-checkbox[data-id]').forEach((box) => {
       box.checked = Boolean(state[box.dataset.id]);
+      const auditNode = ensureAuditNode(box);
+      auditNode.textContent = formatAuditInfo(box.dataset.id);
     });
   });
 }
 
-function mergeState(nextState) {
+function mergeState(nextState, nextAuditState = {}) {
   Object.entries(nextState || {}).forEach(([taskId, checked]) => {
     state[taskId] = Boolean(checked);
   });
-  renderCheckboxes();
+  Object.entries(nextAuditState || {}).forEach(([taskId, audit]) => {
+    auditState[taskId] = {
+      checkedBy: audit?.checkedBy || '',
+      checkedAt: audit?.checkedAt || '',
+    };
+  });
+  renderChecklist();
 }
 
 async function loadRemoteState() {
@@ -71,7 +136,7 @@ async function loadRemoteState() {
 
   const { data, error } = await supabase
     .from('checklist_progress')
-    .select('task_id, checked')
+    .select('task_id, checked, checked_by, checked_at')
     .eq('checklist_id', CHECKLIST_ID);
 
   if (error) {
@@ -79,12 +144,22 @@ async function loadRemoteState() {
     return;
   }
 
-  mergeState(normalizeTaskRows(data));
+  const { checkedState, auditState: nextAuditState } = normalizeTaskRows(data);
+  mergeState(checkedState, nextAuditState);
 }
 
 async function saveTask(taskId, checked) {
-  state[taskId] = checked;
-  renderCheckboxes();
+  const checkedAt = new Date().toISOString();
+  const checkedBy = operatorName.value.trim() || '未命名成员';
+  mergeState(
+    { [taskId]: checked },
+    {
+      [taskId]: {
+        checkedBy,
+        checkedAt,
+      },
+    }
+  );
 
   if (!supabase) return;
 
@@ -93,6 +168,8 @@ async function saveTask(taskId, checked) {
     checklist_id: CHECKLIST_ID,
     task_id: taskId,
     checked,
+    checked_by: checkedBy,
+    checked_at: checkedAt,
     updated_at: new Date().toISOString(),
   });
 
@@ -101,10 +178,15 @@ async function saveTask(taskId, checked) {
 
 async function setAll(checked) {
   const nextState = {};
+  const nextAuditState = {};
+  const checkedAt = new Date().toISOString();
+  const checkedBy = operatorName.value.trim() || '未命名成员';
   for (let index = 0; index < TASK_COUNT; index += 1) {
-    nextState[`task-${index}`] = checked;
+    const taskId = `task-${index}`;
+    nextState[taskId] = checked;
+    nextAuditState[taskId] = { checkedBy, checkedAt };
   }
-  mergeState(nextState);
+  mergeState(nextState, nextAuditState);
 
   if (!supabase) return;
 
@@ -113,6 +195,8 @@ async function setAll(checked) {
     checklist_id: CHECKLIST_ID,
     task_id: taskId,
     checked: value,
+    checked_by: checkedBy,
+    checked_at: checkedAt,
     updated_at: new Date().toISOString(),
   }));
   const { error } = await supabase.from('checklist_progress').upsert(rows);
@@ -142,13 +226,27 @@ function subscribeToRemoteChanges() {
       },
       (payload) => {
         const row = payload.new;
-        if (row?.task_id) mergeState({ [row.task_id]: row.checked });
+        if (row?.task_id) {
+          mergeState(
+            { [row.task_id]: row.checked },
+            {
+              [row.task_id]: {
+                checkedBy: row.checked_by || '',
+                checkedAt: row.checked_at || '',
+              },
+            }
+          );
+        }
       }
     )
     .subscribe((status) => {
       if (status === 'SUBSCRIBED') syncStatus.value = 'connected';
       if (status === 'CHANNEL_ERROR') syncStatus.value = 'error';
     });
+}
+
+function saveOperatorName() {
+  localStorage.setItem(OPERATOR_NAME_KEY, operatorName.value.trim());
 }
 
 function exportMarkdown() {
@@ -163,8 +261,9 @@ function exportMarkdown() {
 }
 
 onMounted(async () => {
+  operatorName.value = localStorage.getItem(OPERATOR_NAME_KEY) || '';
   ensureState();
-  renderCheckboxes();
+  renderChecklist();
   await loadRemoteState();
   subscribeToRemoteChanges();
 });
@@ -252,8 +351,28 @@ onBeforeUnmount(() => {
 
 .ui-checklist-actions {
   display: flex;
+  align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.ui-checklist-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.ui-checklist-user select {
+  width: 150px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: #fff;
+  font-size: 14px;
 }
 
 button {
@@ -343,6 +462,18 @@ button:hover {
 .ui-checklist-content :deep(input[type="checkbox"]:checked + span) {
   color: var(--muted);
   text-decoration: line-through;
+}
+
+.ui-checklist-content :deep(.ui-checklist-audit) {
+  display: inline-flex;
+  margin-left: 8px;
+  color: #8a94a6;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ui-checklist-content :deep(.ui-checklist-audit:empty) {
+  display: none;
 }
 
 .ui-checklist-content :deep(table) {

@@ -2,9 +2,17 @@ create table if not exists public.checklist_progress (
   checklist_id text not null,
   task_id text not null,
   checked boolean not null default false,
+  checked_by text,
+  checked_at timestamptz,
   updated_at timestamptz not null default now(),
   primary key (checklist_id, task_id)
 );
+
+alter table public.checklist_progress
+add column if not exists checked_by text;
+
+alter table public.checklist_progress
+add column if not exists checked_at timestamptz;
 
 alter table public.checklist_progress enable row level security;
 
